@@ -1,0 +1,554 @@
+---
+output:
+    beamer_presentation:
+        includes:
+            in_header: style/header.tex
+            before_body: style/body.tex
+        fig_caption: false
+        fig_crop: false
+        latex_engine: xelatex
+classoption:
+    "aspectratio=169"
+---
+
+```{r setup, include=FALSE, results="hide"}
+library(data.table)
+library(ggplot2)
+library(scales)
+library(bit64)
+
+set.seed(42)
+
+# enable Lato on Ubuntu
+my_sis <- Sys.info()["sysname"]
+if (my_sis == "Linux") {
+    sysfonts::font_add(
+        "Lato",
+        regular = "/usr/share/fonts/truetype/lato/Lato-Regular.ttf",
+        bold = "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
+        italic = "/usr/share/fonts/truetype/lato/Lato-Italic.ttf",
+        bolditalic = "/usr/share/fonts/truetype/lato/Lato-BoldItalic.ttf")
+}
+if(my_sis == "Darwin") {
+    sysfonts::font_add(
+        "Lato",
+        regular = "/Users/tom/Library/Fonts/Lato-Regular.ttf",
+        bold = "/Users/tom/Library/Fonts/Lato-Bold.ttf",
+        italic = "/Users/tom/Library/Fonts/Lato-Italic.ttf",
+        bolditalic = "/Users/tom/Library/Fonts/Lato-BoldItalic.ttf")
+}
+
+# knitr options that work with fig_height: 6, fig_width: 8, and fig_crop: false
+# in beamer presentations
+fh <- grid::convertUnit(grid::unit(227, "pt"), "in", valueOnly = TRUE)
+fw <- grid::convertUnit(grid::unit(398, "pt"), "in", valueOnly = TRUE)
+knitr::opts_chunk$set(
+    dev.args=list(bg = "transparent",
+                  family = "Lato",
+                  pointsize = 8),
+    dev="cairo_pdf",
+    echo = FALSE,
+    message = FALSE,
+    warning = FALSE,
+    cache = TRUE,
+    fig.align = 'center',
+    # out.width = "0.8\\textwidth",
+    # out.height  ="0.8\\textheight")
+    fig.height = fh * 0.9,
+    fig.width = fw,
+    out.width = NULL,
+    out.height = NULL)
+
+
+# colour scheme for plots
+viridis_d <- viridis::viridis_pal()
+heatscale <- RColorBrewer::brewer.pal(6, "YlOrRd")
+
+```
+
+# Failing biocontrol
+
+![](img/1295012-PPT.jpg){height=75mm}
+
+# Not a good candidate for short-read assembly
+
+\begincols[c]
+\begincol{0.5\textwidth}
+
+```{r kmer_plot, fig.width=0.45*fw, fig.height = 0.8*fh, cache = TRUE}
+hist_before_file <- "data/meraculous_depth/hist_before.txt"
+hist_after_file <- "data/meraculous_depth/hist_after.txt"
+
+# read data
+hist_data_list <- lapply(list("Raw" = hist_before_file,
+                              "Normalised" = hist_after_file),
+                         fread)
+combined_data <- rbindlist(hist_data_list, idcol = "type")
+
+# arrange plot
+combined_data[, type := factor(type, levels = c("Raw", "Normalised"))]
+
+# plot
+ggplot(combined_data, aes(x = `#Depth`,
+                                       y = Unique_Kmers,
+                                       colour = type)) +
+    theme(legend.position = "top") +
+    geom_path(alpha = 0.75) +
+    scale_colour_manual(values = viridis_d(4)[1:2],
+                        guide = guide_legend(title = NULL)) +
+    scale_y_continuous(
+        trans = "log10",
+        labels = trans_format("log10", math_format(10^.x)),
+        breaks = trans_breaks("log10", function(x) 10^x)) +
+    scale_x_continuous(trans = log_trans(base = 4),
+                       breaks = trans_breaks(function(x) log(x, 4),
+                                             function(x) 4^x)) +
+    xlab("31-mer depth") + ylab("Number of unique 31-mers")
+
+
+```
+
+\endcol
+\begincol{0.5\textwidth}
+
+```{r tig_plot, fig.width=0.45*fw, fig.height = 0.8*fh, cache = TRUE}
+FreadHist <- function(x){
+    as.data.table(
+        readr::read_table2(
+            x,
+            comment = "#",
+            col_names = FALSE))[
+                , .(min_depth = X2,
+                    max_depth = X4,
+                    count = X7)]
+}
+
+tig_cov <- rbindlist(list(Isotigs = FreadHist(
+    "data/meraculous_depth/isotigs.depth.hist"),
+    Diplotigs = FreadHist(
+        "data/meraculous_depth/diplotigs.depth.hist")),
+    idcol = "type")
+
+ggplot(tig_cov, aes(x = min_depth, y = count, fill = rev(type))) +
+    theme(legend.position = "top") +
+    xlab(expression(italic("k") * "mer depth")) + ylab("Number of contigs") +
+    scale_fill_manual(values = viridis_d(4)[3:4],
+                        guide = guide_legend(title = NULL)) +
+    xlim(c(0, 100)) +
+    geom_area(position = position_identity(),
+              alpha = 0.75)
+```
+
+\endcol
+\endcols
+
+# Early attempt with LSK108 (1.1 Gb, *L*~50~ = 7.0 kb)
+
+\begincols[c]
+\begincol{0.5\textwidth}
+
+![](img/before_gel.png){height=35mm}
+
+\vspace{12pt}
+
+- Phenol–chloroform, column, beads only, *etc*.
+- 260/280 ≈ 2.00–2.20
+- 260/230 ≈ 0.90–1.20
+
+\endcol
+\begincol{0.5\textwidth}
+
+```{r asw_12a, fig.width=0.5*fw, cache = FALSE}
+asw_12a <- fread("data/asw_12a/sequencing_summary.txt")
+setorder(asw_12a, sequence_length_template)
+asw_12a_l50 <- asw_12a[passes_filtering == TRUE][
+    cumsum(as.numeric(sequence_length_template)) / sum(sequence_length_template) > 0.5,
+    min(sequence_length_template)]
+
+ggplot(asw_12a, 
+       aes(x = sequence_length_template,
+           y = mean_qscore_template)) +
+    theme_grey(base_size = 8,
+               base_family = "Lato") +
+    ylab("Mean Q score") + xlab("Read length") +
+    scale_fill_viridis_c(trans = log_trans(),
+                         breaks = log_breaks(),
+                         guide = guide_colourbar(
+                             title = "Number\nof reads"
+                         )) +
+    scale_x_continuous(trans = log_trans(base = 4),
+                       breaks = trans_breaks(function(x) log(x, 4),
+                                             function(x) 4^x)) +
+    geom_hex() +
+    geom_vline(xintercept = asw_12a_l50,
+               linetype = 2)
+```
+
+\endcol
+\endcols
+
+# Good enough DNA extractions (5.2 Gb, *L*~50~ = 21.4 kb)
+
+\begincols[c]
+\begincol{0.5\textwidth}
+
+![](img/after_gel.png){height=70mm}
+
+\endcol
+\begincol{0.5\textwidth}
+
+```{r sample_8, fig.width=0.5*fw, fig.height = 0.8*fh, cache = TRUE}
+sample_8 <- fread("data/sample_8/basecalled/sequencing_summary.txt")
+setorder(sample_8, sequence_length_template)
+s8_l50 <- sample_8[passes_filtering == TRUE][
+    cumsum(as.numeric(sequence_length_template)) / sum(sequence_length_template) > 0.5,
+    min(sequence_length_template)]
+
+ggplot(sample_8, 
+       aes(x = sequence_length_template,
+           y = mean_qscore_template)) +
+    theme_grey(base_size = 8,
+               base_family = "Lato") +
+    ylab("Mean Q score") + xlab("Read length") +
+    scale_fill_viridis_c(trans = log_trans(),
+                         breaks = log_breaks(),
+                         guide = guide_colourbar(
+                             title = "Number\nof reads"
+                         )) +
+    scale_x_continuous(trans = log_trans(base = 4),
+                       breaks = trans_breaks(function(x) log(x, 4),
+                                             function(x) 4^x)) +
+    geom_hex() +
+    geom_vline(xintercept = s8_l50,
+               linetype = 2)
+```
+
+\endcol
+\endcols
+
+# Whole-genome amplification
+
+\begincols[c]
+\begincol{.35\textwidth}
+
+![](img/MDA_reaction_1.JPG)
+
+\endcol
+\begincol{.65\textwidth}
+
+---------------------------------------------- 
+          Reaction   DNA input     WGA yield
+                        (ng)          (µg) 
+------------------ ------------- ------------- 
+       **ASW 47a**      68          7.7 
+
+       **ASW 47b**      68          25.6 
+
+       **ASW 47c**      68          27.0
+---------------------------------------------- 
+
+\endcol
+\endcols
+
+
+<!-- # Amplified sample read stats -->
+
+<!-- ![](img/length_histogram.pdf){height=70mm} -->
+
+# 6 flowcells: 28 Mb, *L*~50~ = 9.3 kb
+
+<!-- re-enable later -->
+
+![](img/rl_plot-1.pdf)
+
+```{r rl_plot, cache = TRUE, cache.lazy = FALSE}
+# bc_results <- readRDS("output/bc_results.Rds")
+# setorder(bc_results, sequence_length_template)
+# l50_calcs <- bc_results[passes_filtering == TRUE, .(
+#     sequence_length_template,
+#     cs = cumsum(as.numeric(sequence_length_template)),
+#     tl = sum(sequence_length_template)),
+#     by = fc]
+# l50_dt <- l50_calcs[cs / tl > 0.5,
+#                     .(xintercept = min(sequence_length_template)),
+#                     by = fc]
+# 
+# ggplot(bc_results, 
+#        aes(x = sequence_length_template,
+#            y = mean_qscore_template)) +
+#     theme_grey(base_size = 8,
+#                base_family = "Lato") +
+#     facet_wrap(~ fc) +
+#     ylab("Mean Q score") + xlab("Read length") +
+#     scale_fill_viridis_c(trans = log_trans(),
+#                          breaks = log_breaks(),
+#                          guide = guide_colourbar(
+#                              title = "Number\nof reads"
+#                          )) +
+#     scale_x_continuous(trans = log_trans(base = 4),
+#                        breaks = trans_breaks(function(x) log(x, 4),
+#                                              function(x) 4^x)) +
+#     geom_hex() +
+#     geom_vline(mapping = aes(xintercept = xintercept),
+#                data = l50_dt,
+#                linetype = 2)
+
+```
+
+
+#
+
+\begincols[c]
+\begincol{0.5\textwidth}
+
+\centering{
+\href{https://github.com/tomharrop/asw-flye-polish}{\textbf{tomharrop/asw-flye-polish}}
+}
+
+\vspace{12pt}
+
+![](img/final_assembly.pdf){height=50mm}
+
+\endcol
+\begincol{0.5\textwidth}
+
+- Tried flye, canu, wtdbg2, miniasm
+- Repeat annotation
+- Standard assembly metrics, mappability, BUSCO
+- Genome annotation
+
+\endcol
+\endcols
+
+# Tangles
+
+![](img/graph_2.png){height=75mm}
+
+# Repeats
+
+```latex
+sequences:         32278
+total length: 1255394549 bp  (1255393394 bp excl N/X-runs)
+GC level:         31.02 %
+bases masked:  861620893 bp ( 68.63 %)
+==================================================
+               number of      length   percentage
+               elements*    occupied  of sequence
+--------------------------------------------------
+Unclassified:    4876110    911654153 bp   72.62 %
+
+Total interspersed repeats:911654153 bp   72.62 %
+
+Simple repeats:  218351      9752544 bp    0.78 %
+==================================================
+```
+
+# Bigger than other weevil genome assemblies
+
+```{r weevil-compare, cache = FALSE}
+ass_stats <- fread("data/assembly_stats.txt")
+ass_fn <- fread("data/assembly_filenames.txt")
+
+# prepare assembly stats
+ass_stats[, bn := basename(filename)]
+stats_with_names <- merge(ass_stats, ass_fn, by.x = "bn", by.y = "filename")
+stats_with_names[, common_name := gsub("_", " ", common_name)]
+cn_order <- c("Illumina only",
+              "Flye + racon + racon",
+              "Mountain pine beetle",
+              "Coffee berry borer", 
+              "Rice weevil")
+stats_with_names[, common_name := factor(common_name, levels = cn_order)]
+
+# mung assembly stats
+stats_with_names[common_name %in% c("Illumina only",
+                                    "Flye + racon + racon"),
+                 fill := "a"]
+stats_with_names[!common_name %in% c("Illumina only",
+                                    "Flye + racon + racon"),
+                 fill := "b"]
+stat_names <- c("contig_bp", "n_scaffolds",
+                "scaf_L50", "scaf_max")
+mod_stats <- stats_with_names[, .(
+    "'Assembly length (MB)'" = contig_bp / 1e6,
+    "'Scaffolds (thousands)'" = n_scaffolds / 1e3,
+    "italic('L')[50]~'(KB)'" = scaf_L50 / 1e3,
+    "'GC content'" = gc_avg * 100),
+    by = .(species_name, common_name, fill)]
+mod_stats_long <- melt(
+    mod_stats,
+    id.vars = c("species_name", "common_name", "fill"))
+mod_stats_long[, common_name := factor(common_name, levels = rev(cn_order))]
+
+ggplot(mod_stats_long,
+       aes(x = common_name, y = value, fill = fill)) +
+    theme_grey(base_size = 8, base_family = "Lato") +
+    theme(strip.placement = "outside",
+          strip.background = element_blank()) +
+    coord_flip() +
+    scale_fill_viridis_d(guide = FALSE) +
+    xlab(NULL) + ylab(NULL) +
+    facet_wrap(~ variable,
+               scales = "free_x",
+               labeller = label_parsed,
+               strip.position = "bottom") +
+    geom_col()
+
+```
+
+# More complete than Illumina-only assembly
+
+```{r busco_stats}
+busco_shootout_all <- fread("data/shootout_results_combined.csv")
+
+assembly_order <- c(meraculous = "Illumina only",
+                    canu = "Canu",
+                    flye_denovo_full = "Flye", 
+                    flye_denovo_full_polished = "Flye + racon",
+                    flye_denovo_full_polished2 = "Flye + racon + racon"
+)
+
+cat_order <- c("Complete", "Duplicated", "Fragmented", "Missing")
+
+all_buscos <- busco_shootout_all[, length(unique(`# Busco id`))]
+
+busco_pd <- busco_shootout_all[assembly %in% names(assembly_order),
+                               .(count = length(unique(`# Busco id`))),
+                               by = .(assembly, Status)]
+
+busco_pd[, Status := factor(Status, levels = cat_order)]
+busco_pd[, assembly_name := factor(plyr::revalue(assembly, assembly_order),
+                                   levels = rev(assembly_order))]
+
+ggplot(busco_pd,
+       aes(x = assembly_name, y = 100 * count / all_buscos, fill = assembly_name)) +
+    theme_grey(base_size = 8, base_family = "Lato") +
+    coord_flip() +
+    facet_grid(Status ~ .) +
+    xlab(NULL) + ylab("%") +
+    scale_fill_viridis_d(guide = FALSE) + 
+    geom_col()
+```
+
+
+# Mappability
+
+\begincols[c]
+\begincol{0.5\textwidth}
+
+```{r map_back_1, fig.width=0.5*fw, fig.height = 0.8*fh, cache = FALSE}
+thing <- fread("data/gbs_and_gdna_reads.csv")
+thing[, V1 := factor(V1, levels = cn_order)]
+ggplot(thing, aes(x = V1, y = pct, fill = thing)) +
+        theme_grey(base_size = 8, base_family = "Lato") +
+    theme(legend.position = "top") +
+    xlab(NULL) + ylab("Mapping %") +
+    scale_fill_manual(values = viridis_d(4)[c(1, 3)],
+                      guide = guide_legend(title = NULL)) +
+    geom_col(position = position_dodge(width = 0.8),
+             width = 0.5)
+
+```
+
+\endcol
+\begincol{0.5\textwidth}
+
+```{r map_back_2, fig.width=0.5*fw, fig.height = 0.8*fh, cache = FALSE}
+star_results <- fread("data/star_results.csv")
+star_pd <- merge(star_results,
+      ass_fn[, .(species_name, common_name)],
+             by = "species_name")
+star_pd[, common_name := gsub("_", " ", common_name)]
+star_pd[, common_name := factor(common_name, levels = cn_order)]
+
+# generate plot data
+vars_to_plot <- c("Uniquely mapped reads %" = "Uniquely mapped",
+  "% of reads mapped to multiple loci" = "Multimapped", 
+  "% of reads unmapped: too short" = "Unmapped")
+spec_to_plot <- c("Illumina only", "Flye + racon + racon")
+
+pd <- star_pd[variable %in% names(vars_to_plot) &
+                  common_name %in% spec_to_plot]
+# pd <- star_pd[variable %in% names(vars_to_plot)]
+
+
+pd[, grp := factor(plyr::revalue(variable, vars_to_plot),
+                   levels = vars_to_plot)]
+
+ggplot(pd, aes(x = common_name, y = value, colour = tissue)) +
+        theme_grey(base_size = 8, base_family = "Lato") +
+    theme(legend.position = "top",
+          axis.text.x = element_text(angle = 30,
+                                     hjust = 1,
+                                     vjust = 1)) +
+    facet_wrap(~ grp, ncol = 3) +
+    xlab(NULL) + ylab("%") +
+    scale_colour_manual(values = viridis_d(4)[c(2, 4)],
+                      guide = guide_legend(title = NULL)) +
+    geom_point(position = position_jitter(width = 0.2))
+```
+    
+\endcol
+\endcols
+
+<!-- # -->
+
+<!-- ![](img/screenshot-mobile.twitter.com-2019.11.15-11_53_41.png){height=75mm} -->
+
+
+#
+
+\begincols[c]
+\begincol{0.5\textwidth}
+
+\centering{
+\href{https://github.com/tomharrop/asw-flye-polish}{\textbf{tomharrop/asw-flye-polish}}
+}
+
+\vspace{12pt}
+
+![](img/final_assembly.pdf){height=50mm}
+
+\endcol
+\begincol{0.5\textwidth}
+
+- Couldn't assemble without long reads
+- Ordinary users can do ONT sequencing
+- Preparing the sample is the hardest bit
+
+\endcol
+\endcols
+
+# 
+
+\vspace{5mm}
+    
+\begincols[c]
+\begincol{.5\textwidth}
+    
+![](img/OUNZ.png){height=30mm}
+
+\endcol
+\begincol{.5\textwidth}
+
+![](img/GA-Wide-Colour-1200px.jpg){height=30mm}
+
+\endcol
+\endcols
+
+\vspace{5mm}
+
+\begincols[c]
+\begincol{.5\textwidth}
+
+![](img/bprclogo.jpg){height=20mm}
+
+\endcol
+\begincol{.5\textwidth}
+
+![](img/AgResearchCMYK.pdf){height=20mm}
+
+\endcol
+\endcols
+
+\vspace{5mm}
